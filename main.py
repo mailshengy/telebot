@@ -9,8 +9,8 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 DB_URL = os.getenv("DATABASE_URL")
-# Change this string to your local timezone (e.g., 'America/New_York', 'Europe/London')
-TIMEZONE = "Asia/Singapore" 
+# Change this to your timezone (e.g., 'Asia/Singapore', 'America/New_York')
+TIMEZONE = "Asia/Singapore"
 
 # --- LOGGING ---
 logging.basicConfig(
@@ -55,7 +55,7 @@ def get_all_members():
 
 # --- BOT COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Thankful Bot is Online! Type /join to get daily reminders.")
+    await update.message.reply_text("Thankful Bot is Online! Type /join to subscribe.")
 
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -67,19 +67,31 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"DB Error: {e}")
         await update.message.reply_text("❌ Error joining database.")
 
-# --- DAILY TASK ---
+# --- REMINDER LOGIC ---
 async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
-    """Sends the daily message to all users."""
+    """
+    Sends the daily message to all users. 
+    This function is called by the timer OR the /test command.
+    """
     members = get_all_members()
     logging.info(f"Sending reminders to {len(members)} users...")
     
+    if not members:
+        logging.warning("No members found in database.")
+        return
+
     for chat_id, name in members:
         try:
-            # The exact message you wanted
             msg = f"{name}, reminder to share any thanksgiving or devotions for the day! 🌞"
             await context.bot.send_message(chat_id=chat_id, text=msg)
         except Exception as e:
             logging.error(f"Failed to send to {name}: {e}")
+
+# --- TEST COMMAND ---
+async def test_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually triggers the reminder loop immediately."""
+    await update.message.reply_text("🔄 Testing: Sending reminders now...")
+    await send_reminders(context)
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
@@ -92,11 +104,10 @@ if __name__ == "__main__":
     # 3. Add Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("join", join))
+    application.add_handler(CommandHandler("test", test_now)) # <--- NEW COMMAND
 
-    # 4. Schedule Job
-    # We define the specific time zone
+    # 4. Schedule Job (8:00 AM)
     tz = pytz.timezone(TIMEZONE)
-    # Set the time (e.g., 8:00 AM)
     target_time = datetime.time(hour=8, minute=0, second=0, tzinfo=tz)
     
     job_queue = application.job_queue
