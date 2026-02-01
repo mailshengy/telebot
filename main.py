@@ -55,7 +55,7 @@ def get_all_members():
 
 # --- BOT COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot is Online! Type /join to get daily reminders.")
+    await update.message.reply_text("Thankful Bot is Online! Type /join to get daily reminders.")
 
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -76,7 +76,7 @@ async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
     for chat_id, name in members:
         try:
             # The exact message you wanted
-            msg = f"{name}, reminders for the day! 🌞"
+            msg = f"{name}, reminder to share any thanksgiving or devotions for the day! 🌞"
             await context.bot.send_message(chat_id=chat_id, text=msg)
         except Exception as e:
             logging.error(f"Failed to send to {name}: {e}")
