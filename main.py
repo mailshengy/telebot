@@ -9,7 +9,6 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 DB_URL = os.getenv("DATABASE_URL")
-# Change this to your timezone (e.g., 'Asia/Singapore', 'America/New_York')
 TIMEZONE = "Asia/Singapore"
 
 # --- LOGGING ---
@@ -19,21 +18,34 @@ logging.basicConfig(
 
 # --- DATABASE SETUP ---
 def init_db():
-    """Create the table if it doesn't exist."""
     conn = psycopg2.connect(DB_URL)
     c = conn.cursor()
+    
+    # 1. Table for Members
     c.execute("""
         CREATE TABLE IF NOT EXISTS members (
             user_id BIGINT PRIMARY KEY,
             chat_id BIGINT,
-            full_name TEXT
+            full_name TEXT,
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    
+    # 2. Table for State (Remembering whose turn it is)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS bot_state (
+            id INTEGER PRIMARY KEY,
+            current_index INTEGER
+        )
+    """)
+    
+    # Initialize state if empty
+    c.execute("INSERT INTO bot_state (id, current_index) VALUES (1, -1) ON CONFLICT (id) DO NOTHING")
+    
     conn.commit()
     conn.close()
 
 def add_user(user_id, chat_id, full_name):
-    """Save or update user details."""
     conn = psycopg2.connect(DB_URL)
     c = conn.cursor()
     c.execute("""
@@ -44,76 +56,97 @@ def add_user(user_id, chat_id, full_name):
     conn.commit()
     conn.close()
 
-def get_all_members():
-    """Fetch all subscribers."""
+def get_rotation_info():
+    """Fetches all members and the current index state."""
     conn = psycopg2.connect(DB_URL)
     c = conn.cursor()
-    c.execute("SELECT chat_id, full_name FROM members")
-    rows = c.fetchall()
+    
+    # Get all members sorted by join time (or user_id) so the order is stable
+    c.execute("SELECT chat_id, full_name FROM members ORDER BY joined_at ASC, user_id ASC")
+    members = c.fetchall()
+    
+    # Get last index
+    c.execute("SELECT current_index FROM bot_state WHERE id = 1")
+    current_index = c.fetchone()[0]
+    
     conn.close()
-    return rows
+    return members, current_index
+
+def update_index(new_index):
+    """Saves the new index to the DB."""
+    conn = psycopg2.connect(DB_URL)
+    c = conn.cursor()
+    c.execute("UPDATE bot_state SET current_index = %s WHERE id = 1", (new_index,))
+    conn.commit()
+    conn.close()
 
 # --- BOT COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Thankful Bot is Online! Type /join to subscribe.")
+    await update.message.reply_text("Thankful Bot is Online! Type /join to enter the rotation.")
 
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     try:
         add_user(user.id, chat.id, user.full_name)
-        await update.message.reply_text(f"✅ {user.full_name}, you are added to the reminder list!")
+        await update.message.reply_text(f"✅ {user.full_name}, you have been added to the rotation!")
     except Exception as e:
         logging.error(f"DB Error: {e}")
         await update.message.reply_text("❌ Error joining database.")
 
-# --- REMINDER LOGIC ---
+# --- ROTATION LOGIC ---
 async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Sends the daily message to all users. 
-    This function is called by the timer OR the /test command.
-    """
-    members = get_all_members()
-    logging.info(f"Sending reminders to {len(members)} users...")
+    members, last_index = get_rotation_info()
     
     if not members:
-        logging.warning("No members found in database.")
+        logging.warning("No members in rotation.")
         return
 
-    for chat_id, name in members:
-        try:
-            msg = f"{name}, reminder to share any thanksgiving or devotions for the day! 🌞"
-            await context.bot.send_message(chat_id=chat_id, text=msg)
-        except Exception as e:
-            logging.error(f"Failed to send to {name}: {e}")
+    # Calculate next person
+    # logic: next_index = (last_index + 1) % total_members
+    # The '%' (modulo) operator makes it loop back to 0 automatically when it reaches the end.
+    next_index = (last_index + 1) % len(members)
+    
+    # Get the lucky person
+    chat_id, name = members[next_index]
+    
+    logging.info(f"It is {name}'s turn (Index: {next_index})")
+
+    try:
+        # Send message to the specific person
+        msg = f"Hey {name}, reminder to share any thanksgiving or devotions for the day! 🌞"
+        await context.bot.send_message(chat_id=chat_id, text=msg)
+        
+        # ALSO: Send a message to the group if you want everyone to know?
+        # If you want to notify the whole group who is on duty, you need the Group Chat ID.
+        # For now, this sends to the individual's private chat or the group where they typed /join.
+        
+        # Save the new state so tomorrow we pick the next person
+        update_index(next_index)
+        
+    except Exception as e:
+        logging.error(f"Failed to send to {name}: {e}")
 
 # --- TEST COMMAND ---
-async def test_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manually triggers the reminder loop immediately."""
-    await update.message.reply_text("🔄 Testing: Sending reminders now...")
+async def test_rotation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually triggers the rotation to see who is next."""
+    await update.message.reply_text("🔄 Testing Rotation...")
     await send_reminders(context)
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    # 1. Initialize DB
     init_db()
 
-    # 2. Build App
     application = Application.builder().token(TOKEN).build()
 
-    # 3. Add Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("join", join))
-    application.add_handler(CommandHandler("test", test_now)) # <--- NEW COMMAND
+    application.add_handler(CommandHandler("test", test_rotation))
 
-    # 4. Schedule Job (8:00 AM)
     tz = pytz.timezone(TIMEZONE)
     target_time = datetime.time(hour=8, minute=0, second=0, tzinfo=tz)
     
     job_queue = application.job_queue
     job_queue.run_daily(send_reminders, time=target_time)
     
-    logging.info(f"Bot started. Reminders scheduled for 8:00 AM {TIMEZONE}")
-
-    # 5. Run Forever
     application.run_polling()
